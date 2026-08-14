@@ -276,7 +276,8 @@ Leave a blank line between slides — or paste a long block and it'll be split f
 
 <div class="bar"><div class="in">
   <div class="lab"><div class="k">Deck</div><div class="v" id="barLab">Nothing yet</div></div>
-  <button class="btn g" type="button" onclick="dlAll()" id="dlBtn">Download all</button>
+  <button class="btn g" type="button" onclick="dlPdf()" id="pdfBtn">PDF for LinkedIn</button>
+  <button class="btn" type="button" onclick="dlAll()" id="dlBtn">PNGs</button>
 </div></div>
 
 <div class="toast" id="toast"></div>
@@ -627,7 +628,8 @@ function render(){
   if(!slides.length){
     deck.innerHTML='<div class="hint" style="padding:40px 0;text-align:center;font-size:14px">'+
       'Write something on the left and your slides appear here.</div>';
-    $('barLab').textContent='Nothing yet';$('barLab').className='v';$('dlBtn').disabled=true;return;
+    $('barLab').textContent='Nothing yet';$('barLab').className='v';
+    $('dlBtn').disabled=true;$('pdfBtn').disabled=true;return;
   }
   var over=0;
   slides.forEach(function(s,i){
@@ -649,7 +651,7 @@ function render(){
     deck.appendChild(slot);CANV.push(cv);
     drawSlide(cv,s,i,slides.length);
   });
-  $('dlBtn').disabled=false;
+  $('dlBtn').disabled=false;$('pdfBtn').disabled=false;
   $('barLab').textContent=slides.length+' slides'+(over?' \u00B7 '+over+' too wordy':' \u00B7 all readable');
   $('barLab').className='v'+(over?' warn':'');
 }
@@ -719,6 +721,84 @@ function logoPalette(img){
       .sort(function(a,b){return b.score-a.score}).slice(0,4)
       .map(function(b){return rgbHex(b.r/b.n,b.g/b.n,b.b/b.n)});
   }catch(e){return []}
+}
+
+
+/* ---------- PDF ----------
+   Written byte by byte rather than via a library. PDF can embed JPEG data
+   directly (DCTDecode), so a multi-page deck is just: one image object, one
+   content stream and one page object per slide, plus an xref table of byte
+   offsets. No CDN to outlive. */
+function jpegBytes(cv,q){
+  var url=cv.toDataURL('image/jpeg',q||0.92);
+  var b64=url.slice(url.indexOf(',')+1);
+  var bin=atob(b64),out=new Uint8Array(bin.length);
+  for(var i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);
+  return out;
+}
+function buildPdf(canvases){
+  var enc=new TextEncoder(),chunks=[],len=0;
+  function put(d){
+    var a=(typeof d==='string')?enc.encode(d):d;
+    chunks.push(a);len+=a.length;
+  }
+  var N=canvases.length,offsets={},num=3,per=[];
+  for(var i=0;i<N;i++)per.push({img:num++,cont:num++,page:num++});
+
+  put('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+
+  offsets[1]=len;
+  put('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+
+  offsets[2]=len;
+  put('2 0 obj\n<< /Type /Pages /Count '+N+' /Kids ['+
+      per.map(function(x){return x.page+' 0 R'}).join(' ')+'] >>\nendobj\n');
+
+  canvases.forEach(function(cv,i){
+    var jpg=jpegBytes(cv),W=cv.width,H=cv.height,o=per[i];
+
+    offsets[o.img]=len;
+    put(o.img+' 0 obj\n<< /Type /XObject /Subtype /Image /Width '+W+' /Height '+H+
+        ' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+
+        jpg.length+' >>\nstream\n');
+    put(jpg);
+    put('\nendstream\nendobj\n');
+
+    var content='q\n'+W+' 0 0 '+H+' 0 0 cm\n/Im0 Do\nQ\n';
+    offsets[o.cont]=len;
+    put(o.cont+' 0 obj\n<< /Length '+enc.encode(content).length+' >>\nstream\n'+
+        content+'endstream\nendobj\n');
+
+    offsets[o.page]=len;
+    put(o.page+' 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 '+W+' '+H+']'+
+        ' /Resources << /XObject << /Im0 '+o.img+' 0 R >> >>'+
+        ' /Contents '+o.cont+' 0 R >>\nendobj\n');
+  });
+
+  var total=num,xrefAt=len;
+  var xref='xref\n0 '+total+'\n0000000000 65535 f \n';
+  for(var n=1;n<total;n++){
+    var off=offsets[n]||0;
+    xref+=('0000000000'+off).slice(-10)+' 00000 n \n';
+  }
+  put(xref);
+  put('trailer\n<< /Size '+total+' /Root 1 0 R >>\nstartxref\n'+xrefAt+'\n%%EOF\n');
+
+  var all=new Uint8Array(len),at=0;
+  chunks.forEach(function(c){all.set(c,at);at+=c.length});
+  return new Blob([all],{type:'application/pdf'});
+}
+function dlPdf(){
+  if(!CANV.length)return;
+  try{
+    toast('Building your PDF\u2026');
+    var blob=buildPdf(CANV);
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.download='carousel.pdf';a.href=url;a.click();
+    setTimeout(function(){URL.revokeObjectURL(url)},4000);
+    afterDownload();
+  }catch(e){toast('Could not build the PDF')}
 }
 
 /* ---------- export ---------- */
